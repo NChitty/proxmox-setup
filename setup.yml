@@ -1,0 +1,104 @@
+---
+- name: Apt Repositories and Update
+  hosts: proxmox
+  become: yes
+
+  tasks:
+    - name: Add non-production repository
+      blockinfile:
+        path: /etc/apt/sources.list
+        block: |
+          # not for production use
+          deb http://download.proxmox.com/debian {{ ansible_distribution_release }} pve-no-subscription
+
+    - name: Comment out enterprise (PVE)
+      lineinfile:
+        path: /etc/apt/sources.list.d/pve-enterprise.list
+        regexp: "^deb"
+        line: "# deb https://enterprise.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-enterprise"
+
+    - name: Comment out enterprise (Ceph)
+      lineinfile:
+        path: /etc/apt/sources.list.d/ceph.list
+        regexp: "^deb"
+        line: "# deb https://enterprise.proxmox.com/debian/ceph-quincy {{ ansible_distribution_release }} enterprise"
+
+    - name: Apt update and upgrade
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Install required packages
+      apt:
+        name:
+          - zfsutils-linux
+          - smartmontools
+          - nfs-kernel-server
+          - qemu-guest-agent
+        state: present
+
+    - name: Enable SMART monitoring
+      service:
+        name: smartd
+        state: started
+        enabled: yes
+
+- name: Configure IOMMU
+  hosts: proxmox
+  become: yes
+
+  tasks:
+    - name: Update Default GRUB with IOMMU settings
+      lineinfile:
+        path: /etc/default/grub
+        regexp: "^GRUB_CMDLINE_LINUX_DEFAULT="
+        line: "GRUB_CMDLINE_LINUX_DEFAULT=\"quiet intel_iommu=on\""
+
+    - name: Run GRUB Update
+      command: update-grub
+
+    - name: Add modules to /etc/modules
+      blockinfile:
+        path: /etc/modules
+        block: |
+          vfio
+          vfio_iommu_type1
+          vfio_pci
+          vfio_virqfd
+
+    - name: Reboot the host
+      reboot:
+        reboot_timeout: 300
+        pre_reboot_delay: 10
+
+- name: Remove Enterprise Subscription Warning
+  hosts: proxmox
+  become: yes
+
+  tasks:
+    - name: Edit the file
+      ansible.builtin.replace:
+        path: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+        regexp: 'Ext\.Msg\.show\(\{(\s*title: gettext\(''No valid subscription''\),)'
+        replace: 'void({\1'
+        backup: yes
+
+    - name: Restart the Proxmox web service
+      ansible.builtin.systemd:
+        name: pveproxy.service
+        state: restarted
+
+- name: Install VirtIO Driver and ISOs
+  hosts: proxmox
+  become: yes
+
+  tasks:
+    - name: Download VirtIO ISO
+      get_url:
+        url: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
+        dest: /var/lib/vz/template/iso
+
+    - name: Download Ubuntu LTS Server
+      get_url:
+        url: https://releases.ubuntu.com/22.04.4/ubuntu-22.04.4-live-server-amd64.iso
+        dest: /var/lib/vz/template/iso
